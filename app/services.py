@@ -345,15 +345,16 @@ def eod_clearing(
             msg += f"（机构ID={institution_id}）"
         raise ValueError(msg + "，请勿重复清算")
 
-    executed_q = db.query(Trade).filter(
-        Trade.status == TradeStatus.EXECUTED,
-        Trade.trade_date == trade_date,
-    )
+    executed_q = db.query(Trade).filter(Trade.trade_date == trade_date)
     if institution_id is not None:
         executed_q = executed_q.filter(
             (Trade.initiator_id == institution_id)
             | (Trade.counterparty_id == institution_id)
+        ).filter(
+            Trade.status.in_([TradeStatus.EXECUTED, TradeStatus.CLEARED])
         )
+    else:
+        executed_q = executed_q.filter(Trade.status == TradeStatus.EXECUTED)
     executed_trades = executed_q.all()
 
     if not executed_trades:
@@ -398,12 +399,8 @@ def eod_clearing(
         reports.append(report)
         clearing_institutions.add(inst_id)
 
-    if institution_id is None:
-        trade_ids_to_clear = [t.id for t in executed_trades]
-        if trade_ids_to_clear:
-            db.query(Trade).filter(Trade.id.in_(trade_ids_to_clear)).update(
-                {Trade.status: TradeStatus.CLEARED}, synchronize_session="fetch"
-            )
+    for t in executed_trades:
+        t.status = TradeStatus.CLEARED
 
     for inst_id in clearing_institutions:
         inst_reports = [r for r in reports if r.institution_id == inst_id]
