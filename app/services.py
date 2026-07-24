@@ -345,25 +345,27 @@ def eod_clearing(
             msg += f"（机构ID={institution_id}）"
         raise ValueError(msg + "，请勿重复清算")
 
-    executed_q = db.query(Trade).filter(
-        Trade.status == TradeStatus.EXECUTED,
+    # 已成交交易（EXECUTED）需要清算；已被对手方清算（CLEARED）的交易本方仍需
+    # 出报表并释放本方额度，因此两种状态都要纳入本机构的清算口径。
+    settled_q = db.query(Trade).filter(
+        Trade.status.in_([TradeStatus.EXECUTED, TradeStatus.CLEARED]),
         Trade.trade_date == trade_date,
     )
     if institution_id is not None:
-        executed_q = executed_q.filter(
+        settled_q = settled_q.filter(
             (Trade.initiator_id == institution_id)
             | (Trade.counterparty_id == institution_id)
         )
-    executed_trades = executed_q.all()
+    settled_trades = settled_q.all()
 
-    if not executed_trades:
+    if not settled_trades:
         return []
 
     buckets: dict[tuple[int, int], dict] = defaultdict(
         lambda: {"buy": Decimal("0"), "sell": Decimal("0"), "count": 0}
     )
 
-    for t in executed_trades:
+    for t in settled_trades:
         if institution_id is None or t.initiator_id == institution_id:
             key = (t.initiator_id, t.currency_pair_id)
             b = buckets[key]
@@ -383,7 +385,6 @@ def eod_clearing(
             cb["count"] += 1
 
     reports = []
-    clearing_institutions: set[int] = set()
     for (inst_id, cp_id), b in buckets.items():
         report = ClearingReport(
             trade_date=trade_date,
@@ -396,38 +397,39 @@ def eod_clearing(
         )
         db.add(report)
         reports.append(report)
-        clearing_institutions.add(inst_id)
 
-    if institution_id is None:
-        trade_ids_to_clear = [t.id for t in executed_trades]
-        if trade_ids_to_clear:
-            db.query(Trade).filter(Trade.id.in_(trade_ids_to_clear)).update(
-                {Trade.status: TradeStatus.CLEARED}, synchronize_session="fetch"
+    # 仅把本次参与清算的机构的额度和敞口释放掉，绝不触碰其它机构的额度。
+    for r in reports:
+        lim = (
+            db.query(InstitutionLimit)
+            .filter(
+                InstitutionLimit.institution_id == r.institution_id,
+                InstitutionLimit.currency_pair_id == r.currency_pair_id,
             )
+            .first()
+        )
+        if lim is None:
+            continue
+        released_exposure = r.net_volume
+        if abs(released_exposure) <= abs(lim.net_exposure):
+            lim.net_exposure -= released_exposure
+        else:
+            lim.net_exposure = Decimal("0")
+        total_volume = r.buy_volume + r.sell_volume
+        if total_volume <= lim.used_credit:
+            lim.used_credit -= total_volume
+        else:
+            lim.used_credit = Decimal("0")
 
-    for inst_id in clearing_institutions:
-        inst_reports = [r for r in reports if r.institution_id == inst_id]
-        for r in inst_reports:
-            lim = (
-                db.query(InstitutionLimit)
-                .filter(
-                    InstitutionLimit.institution_id == inst_id,
-                    InstitutionLimit.currency_pair_id == r.currency_pair_id,
-                )
-                .first()
-            )
-            if lim is None:
-                continue
-            released_exposure = r.net_volume
-            if abs(released_exposure) <= abs(lim.net_exposure):
-                lim.net_exposure -= released_exposure
-            else:
-                lim.net_exposure = Decimal("0")
-            total_volume = r.buy_volume + r.sell_volume
-            if total_volume <= lim.used_credit:
-                lim.used_credit -= total_volume
-            else:
-                lim.used_credit = Decimal("0")
+    # 只把本机构参与、且尚未清算（EXECUTED）的交易推进到 CLEARED；
+    # 对手方视角的交易保持不动，等其自身清算时再推进。
+    trade_ids_to_clear = [
+        t.id for t in settled_trades if t.status == TradeStatus.EXECUTED
+    ]
+    if trade_ids_to_clear:
+        db.query(Trade).filter(Trade.id.in_(trade_ids_to_clear)).update(
+            {Trade.status: TradeStatus.CLEARED}, synchronize_session="fetch"
+        )
 
     db.commit()
     for r in reports:
