@@ -1,0 +1,21 @@
+# Java / Maven
+target/
+*.class
+*.jar
+*.war
+*.ear
+# H2 内嵌数据库
+data/*.db
+data/*.mv.db
+data/*.trace.db
+data/*.lock.db
+# 日志与环境
+*.log
+.env
+.env.local
+# IDE
+.idea/
+*.iml
+.vscode/
+# 系统
+.DS_Store
