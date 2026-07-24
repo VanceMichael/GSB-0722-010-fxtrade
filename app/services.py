@@ -346,7 +346,7 @@ def eod_clearing(
         raise ValueError(msg + "，请勿重复清算")
 
     executed_q = db.query(Trade).filter(
-        Trade.status == TradeStatus.EXECUTED,
+        Trade.status.in_([TradeStatus.EXECUTED, TradeStatus.CLEARED]),
         Trade.trade_date == trade_date,
     )
     if institution_id is not None:
@@ -398,12 +398,11 @@ def eod_clearing(
         reports.append(report)
         clearing_institutions.add(inst_id)
 
-    if institution_id is None:
-        trade_ids_to_clear = [t.id for t in executed_trades]
-        if trade_ids_to_clear:
-            db.query(Trade).filter(Trade.id.in_(trade_ids_to_clear)).update(
-                {Trade.status: TradeStatus.CLEARED}, synchronize_session="fetch"
-            )
+    trade_ids_to_clear = [t.id for t in executed_trades]
+    if trade_ids_to_clear:
+        db.query(Trade).filter(Trade.id.in_(trade_ids_to_clear)).update(
+            {Trade.status: TradeStatus.CLEARED}, synchronize_session="fetch"
+        )
 
     for inst_id in clearing_institutions:
         inst_reports = [r for r in reports if r.institution_id == inst_id]
@@ -419,15 +418,9 @@ def eod_clearing(
             if lim is None:
                 continue
             released_exposure = r.net_volume
-            if abs(released_exposure) <= abs(lim.net_exposure):
-                lim.net_exposure -= released_exposure
-            else:
-                lim.net_exposure = Decimal("0")
+            lim.net_exposure -= released_exposure
             total_volume = r.buy_volume + r.sell_volume
-            if total_volume <= lim.used_credit:
-                lim.used_credit -= total_volume
-            else:
-                lim.used_credit = Decimal("0")
+            lim.used_credit -= total_volume
 
     db.commit()
     for r in reports:
