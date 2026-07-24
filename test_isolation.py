@@ -143,15 +143,24 @@ def test_isolated_clearing():
         spdb_reports = services.list_clearing_reports(db, institution_id=spdb.id, trade_date=date.today())
         assert_eq(len(spdb_reports), 0, "单独清算BOC不生成SPDB报表")
 
-        print("\n[Step 3] 验证交易状态（单独清算BOC不改全局交易状态，避免牵动对手方视角）")
+        print("\n[Step 3] 验证交易状态（清算BOC应把BOC参与的成交推进到CLEARED，且只动BOC的交易）")
         t_cleared = services.list_trades(db, status="CLEARED", trade_date=date.today())
-        print(f"  CLEARED状态交易数: {len(t_cleared)}")
-        assert_eq(len(t_cleared), 0, "单独清算BOC后CLEARED交易应为0")
+        cleared_ids = sorted(t.id for t in t_cleared)
+        print(f"  CLEARED状态交易ID: {cleared_ids}")
+        assert_eq(cleared_ids, sorted([t1.id, t3.id]), "清算BOC后仅BOC参与的两笔进入CLEARED")
 
         t_exec = services.list_trades(db, status="EXECUTED", trade_date=date.today())
         exec_ids = sorted(t.id for t in t_exec)
         print(f"  EXECUTED状态交易ID: {exec_ids}")
-        assert_eq(sorted([t1.id, t2.id, t3.id]), exec_ids, "EXECUTED保留全部3笔")
+        assert_eq(exec_ids, [t2.id], "未清算的SPDB交易保持EXECUTED，不被BOC清算波及")
+
+        print("\n[Step 3b] 同一天对同一家机构重复清算必须被拒绝")
+        try:
+            services.eod_clearing(db, institution_id=boc.id)
+            print("  ✗ 本应拒绝重复清算BOC，却成功了")
+            raise AssertionError("FAIL: 同一天重复清算同一机构未被拒绝")
+        except ValueError as e:
+            print(f"  ✓ 正确报错: {e}")
 
         boc_lim_after = services.list_institution_limits(db, institution_id=boc.id)[0]
         spdb_lim_after = services.list_institution_limits(db, institution_id=spdb.id)[0]
@@ -239,7 +248,7 @@ def test_isolated_clearing():
         all_trades_final = services.list_trades(db, trade_date=date.today())
         status_set = {t.status.value for t in all_trades_final}
         print(f"  最终全局交易状态集合: {status_set}")
-        assert_eq(status_set, {"EXECUTED"}, "单独清算场景下全局交易状态保持EXECUTED（避免牵动对手方视角）")
+        assert_eq(status_set, {"CLEARED"}, "所有机构清算后，其参与的成交全部进入CLEARED")
 
         print("\n[Step 9] 统计一致性：拒单统计按发起方归属，确保各机构统计口径可对账")
         rejected = services.create_trade(
